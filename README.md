@@ -115,8 +115,8 @@ Before setting up the bot, ensure you have:
 ### Step 1: Clone the Repository
 
 ```bash
-git clone <your-repository-url>
-cd telegram-file-store-bot
+git clone https://github.com/div0enormous/file-store-telegram-bot.git
+cd file-store-telegram-bot
 ```
 
 ### Step 2: Install Dependencies
@@ -941,8 +941,7 @@ SOFTWARE.
 
 For issues, questions, or suggestions:
 - Open an issue on GitHub
-- Contact: [Your Contact Information]
-- Telegram: [@yourusername](https://t.me/yourusername)
+- Telegram: [@yourusername](https://t.me/x0deyen)
 
 ---
 
