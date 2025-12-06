@@ -1,98 +1,44 @@
-# config.py - Enhanced Configuration
+# config.py - Final Configuration File
 
-# Telegram API Credentials
-API_ID = 20338805
-API_HASH = "665da84b46a96d6ad9130ef2e764730e"
-BOT_TOKEN = "7549567390:AAFl59W2yY-xh7FQMO8ank7XIOtpaIo2QZk"
+# --- REQUIRED: Fill these in ---
+# Telegram API Credentials (from my.telegram.org)
+API_ID = 8328942211 # Replace with your API ID
+API_HASH = "YOUR_API_HASH"
+BOT_TOKEN = "YOUR_BOT_API_TOKEN"
 
-# MongoDB (Keep for future use)
-DATABASE_URL = "mongodb+srv://teamads299792458_db_user:YourPassword@cluster0.q8iquia.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-DATABASE_NAME = "FileStoreDB"
+# Your private channel ID where files are stored
+DB_CHANNEL = -88994477333  # Replace with your channel ID
 
-# Bot Configuration
-DB_CHANNEL = -1003068444789      # Your private database channel
-ADMINS = [1500034181]            # List of admin user IDs
+# Your user ID and any other admin user IDs
+ADMINS = [123456789, 987654321]  # Replace with actual Telegram user IDs
 
-# Bot Settings
-BOT_NAME = "Professional File Store Bot"
-BOT_VERSION = "2.0"
-SUPPORT_CHAT = "@your_support_chat"  # Optional: Your support chat username
+# Your API token from ShrinkEarn.com
+SHORTENER_API = "YOUR_SHRINKEARN_API_TOKEN"
 
-# File Upload Settings
-MAX_FILE_SIZE = 2000 * 1024 * 1024  # 2GB in bytes (Telegram limit)
-ALLOWED_FILE_TYPES = [
-    'document', 'video', 'audio', 'photo', 
-    'voice', 'video_note', 'sticker', 'animation'
-]
+# --- DEFAULT SETTINGS (Can be changed from the admin panel) ---
+DEFAULT_UPI_HANDLE = "your-upi-id@okhdfcbank"
+DEFAULT_QR_CODE_URL = "https://i.ibb.co/g9fXy3x/image.png"
+DEFAULT_PAYMENT_LINK = "https://upi.pe/your-link" # Example Link
+DEFAULT_AUTO_DELETE_MINUTES = 10 # Default time in minutes for files to be deleted after sending
 
-# Batch Settings
-MAX_BATCH_SIZE = 1000  # Maximum files per batch
-BATCH_DELAY = 0.5      # Delay between file sends (seconds)
+# Your username for users to send payment screenshots to
+PAYMENT_ADMIN = "YOUR_TELEGRAM_USERNAME" # IF YOU DON'T HAVE USERNAME, USE YOUR TELEGRAM ID
 
-# Advanced Settings
-AUTO_DELETE_AFTER_DAYS = 0.1    # 0 means never delete, set number of days for auto-deletion
-LOG_CHANNEL = None            # Optional: Channel to log bot activities
-FORCE_SUB_CHANNEL = None      # Optional: Channel users must join before accessing files
+# --- TEXT CONFIGURATION ---
+USER_WELCOME_TEXT = "👋 Welcome, {name}!**\n\nI am your file assistant, Sarah. To get a file, simply click on a valid link."
+ADMIN_WELCOME_TEXT = "🛡 **Admin Panel**\n\nWelcome, {name}! Use the menu below to manage the bot."
 
-# Database File
-DB_FILE = "files.db"
+# Text for the "Become a Member" prompt
+BECOME_MEMBER_TEXT = f"""💎 Become a Member!
 
-# Welcome Messages
-USER_WELCOME_TEXT = """
-👋 **Welcome {name}!**
+**Benefits of Being a Member:**
+- No ads, ever.
+- Direct and instant file access.
+- Early access to new content.
 
-🗂️ **Professional File Store Bot**
+**How to Join:**
+1.  Complete the payment using any option below.
+2.  Send a screenshot of the payment to {PAYMENT_ADMIN}.
 
-This bot helps you access files through secure links. 
-All files are safely stored and can be accessed anytime with valid links.
-
-💡 **Need a file?** Just click on any file link shared with you!
-"""
-
-ADMIN_WELCOME_TEXT = """
-🛡️ **Admin Panel - Welcome {name}!**
-
-📊 **Quick Stats:**
-• Files: `{total_files}`
-• Batches: `{total_batches}`
-• Users: `{total_users}`
-
-📤 **Upload Files:** Just send any media file
-📦 **Create Batch:** Use batch mode for multiple files
-
-Choose an option below:
-"""
-
-# Help Text
-HELP_TEXT = """
-📖 **How to Use This Bot**
-
-🔸 **For Users:**
-• Click on file links to download
-• All file types are supported
-• Links work permanently
-
-🔸 **File Types Supported:**
-• Documents (PDF, DOC, etc.)
-• Videos (MP4, MKV, etc.)
-• Photos (JPG, PNG, etc.)
-• Audio files (MP3, etc.)
-• Voice messages
-• Stickers & Animations
-• And much more!
-"""
-
-ABOUT_TEXT = """
-🤖 **Professional File Store Bot**
-
-🔹 **Version:** 2.0 Professional
-🔹 **Features:**
-• All media types support
-• Batch upload/download
-• User management
-• Admin controls
-• Professional UI
-
-🔹 **Built with:** Pyrogram + SQLite
-🔹 **Status:** Fully Operational ✅
+**UPI:** {{upi_handle}}
 """

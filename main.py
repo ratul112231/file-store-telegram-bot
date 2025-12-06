@@ -1,630 +1,388 @@
-import sqlite3, base64
+import base64
+import asyncio
+import requests
+from urllib.parse import quote
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from configbck import API_ID, API_HASH, BOT_TOKEN, DB_CHANNEL, ADMINS
-import asyncio
-from datetime import datetime
+from pyrogram.errors import UserNotParticipant, ChatAdminRequired
+from pyrogram.enums import ParseMode
 
-# Bot setup
+from config import (
+    API_ID, API_HASH, BOT_TOKEN, DB_CHANNEL, ADMINS, SHORTENER_API,
+    PAYMENT_ADMIN, USER_WELCOME_TEXT, ADMIN_WELCOME_TEXT, BECOME_MEMBER_TEXT
+)
+from database import Database
+
+# --- Initialization ---
 bot = Client("FileStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+db = Database()
+user_states = {}
 
-# SQLite setup
-conn = sqlite3.connect("files.db", check_same_thread=False)
-cursor = conn.cursor()
+# --- Helper Functions ---
+def is_admin(user_id: int) -> bool: return user_id in ADMINS
+def encode_payload(p: str) -> str: return base64.urlsafe_b64encode(p.encode()).decode()
+def decode_payload(p: str) -> str:
+    try: return base64.urlsafe_b64decode(p.encode()).decode()
+    except: return None
 
-# Enhanced Tables
-cursor.execute("""CREATE TABLE IF NOT EXISTS files (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id INTEGER,
-    message_id INTEGER,
-    file_name TEXT,
-    file_type TEXT,
-    file_size INTEGER,
-    uploaded_by INTEGER,
-    upload_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)""")
-
-cursor.execute("""CREATE TABLE IF NOT EXISTS batches (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_name TEXT,
-    start_msg INTEGER,
-    end_msg INTEGER,
-    created_by INTEGER,
-    created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)""")
-
-cursor.execute("""CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    first_name TEXT,
-    username TEXT,
-    join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    is_banned INTEGER DEFAULT 0
-)""")
-
-cursor.execute("""CREATE TABLE IF NOT EXISTS batch_upload_sessions (
-    session_id TEXT PRIMARY KEY,
-    admin_id INTEGER,
-    batch_name TEXT,
-    start_msg_id INTEGER,
-    status TEXT DEFAULT 'waiting_end'
-)""")
-
-conn.commit()
-
-# Helper Functions
-def encode_payload(payload: str) -> str:
-    return base64.urlsafe_b64encode(payload.encode()).decode()
-
-def decode_payload(payload: str) -> str:
+def shorten_url(long_url):
+    if not SHORTENER_API or "YOUR" in SHORTENER_API: return long_url
     try:
-        return base64.urlsafe_b64decode(payload.encode()).decode()
-    except:
-        return None
+        api_url = f"https://shrinkearn.com/api?api={SHORTENER_API}&url={quote(long_url)}&format=text"
+        response = requests.get(api_url, timeout=10)
+        return response.text.strip() if response.ok and response.text.strip() else long_url
+    except: return long_url
 
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMINS
+async def check_force_sub(user_id: int):
+    not_joined = []
+    for channel_id in db.get_fsub_channels():
+        try:
+            await bot.get_chat_member(chat_id=channel_id, user_id=user_id)
+        except UserNotParticipant:
+            not_joined.append(channel_id)
+        except Exception:
+            pass
+    return not_joined
 
-def get_file_info(message: Message):
-    """Extract file information from message"""
-    if message.document:
-        return {
-            'name': message.document.file_name or 'Unknown',
-            'type': 'Document',
-            'size': message.document.file_size
-        }
-    elif message.photo:
-        return {
-            'name': f"Photo_{message.photo.file_id[:10]}",
-            'type': 'Photo',
-            'size': message.photo.file_size
-        }
-    elif message.video:
-        return {
-            'name': message.video.file_name or f"Video_{message.video.file_id[:10]}",
-            'type': 'Video',
-            'size': message.video.file_size
-        }
-    elif message.audio:
-        return {
-            'name': message.audio.file_name or f"Audio_{message.audio.file_id[:10]}",
-            'type': 'Audio',
-            'size': message.audio.file_size
-        }
-    elif message.voice:
-        return {
-            'name': f"Voice_{message.voice.file_id[:10]}",
-            'type': 'Voice',
-            'size': message.voice.file_size
-        }
-    elif message.video_note:
-        return {
-            'name': f"VideoNote_{message.video_note.file_id[:10]}",
-            'type': 'Video Note',
-            'size': message.video_note.file_size
-        }
-    elif message.sticker:
-        return {
-            'name': f"Sticker_{message.sticker.file_id[:10]}",
-            'type': 'Sticker',
-            'size': message.sticker.file_size
-        }
-    elif message.animation:
-        return {
-            'name': f"GIF_{message.animation.file_id[:10]}",
-            'type': 'Animation',
-            'size': message.animation.file_size
-        }
-    return None
+async def delete_messages_after_delay(chat_id, message_ids, delay_minutes):
+    if delay_minutes <= 0: return
+    await asyncio.sleep(delay_minutes * 60)
+    try: await bot.delete_messages(chat_id, message_ids)
+    except: pass
 
-def format_file_size(size_bytes):
-    """Convert bytes to human readable format"""
-    if size_bytes == 0:
-        return "0 B"
-    size_names = ["B", "KB", "MB", "GB"]
-    i = 0
-    while size_bytes >= 1024 and i < len(size_names) - 1:
-        size_bytes /= 1024.0
-        i += 1
-    return f"{size_bytes:.1f} {size_names[i]}"
-
-async def add_user(user_id, first_name, username):
-    """Add user to database if not exists"""
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, first_name, username) VALUES (?, ?, ?)", 
-                   (user_id, first_name, username))
-    conn.commit()
-
-# ------------------ USER INTERFACE ------------------
-
-@bot.on_message(filters.command("start") & filters.private)
-async def start_command(_, message):
-    user = message.from_user
-    await add_user(user.id, user.first_name, user.username)
+# --- Core Bot Logic ---
+@bot.on_message(filters.command(["start", "help"]) & filters.private)
+async def start_command(_, message: Message):
+    db.add_user(message.from_user)
+    status = "admin" if is_admin(message.from_user.id) else db.get_user_status(message.from_user.id)
     
-    # Check if user is banned
-    cursor.execute("SELECT is_banned FROM users WHERE user_id = ?", (user.id,))
-    result = cursor.fetchone()
-    if result and result[0] == 1:
-        return await message.reply_text("🚫 You are banned from using this bot.")
+    if status == "banned": return await message.reply_text("🚫 You are banned from using this bot.", quote=True)
     
     if len(message.command) > 1:
-        # Handle file/batch links
-        payload = decode_payload(message.command[1])
-        if not payload:
-            return await message.reply_text("⚠️ Invalid or expired link.")
-        
-        if payload.startswith("file_"):
-            return await send_file(message, int(payload.split("_")[1]))
-        elif payload.startswith("batch_"):
-            return await send_batch(message, int(payload.split("_")[1]))
-    
-    # Show appropriate menu based on user role
-    if is_admin(user.id):
-        return await show_admin_menu(message)
-    else:
-        return await show_user_menu(message)
+        payload = message.command[1]
+        if payload.startswith("unlock_"):
+            original_payload = db.verify_unlock_token(payload.split("_", 1)[1], message.from_user.id)
+            if original_payload:
+                db.grant_temporary_access(message.from_user.id)
+                await message.reply_text("✅ **Access Unlocked for 1 hour!**", quote=True)
+                if original_payload != "None":
+                    await process_payload(message, original_payload)
+            else:
+                await message.reply_text("❌ Invalid or expired unlock link. Please try again.", quote=True)
+            return
 
-async def show_user_menu(message):
-    """Show menu for regular users"""
-    buttons = [
-        [InlineKeyboardButton("📖 How to Use", callback_data="help"),
-         InlineKeyboardButton("ℹ️ About", callback_data="about")],
-        [InlineKeyboardButton("📞 Contact Admin", callback_data="contact")]
-    ]
+        not_joined = await check_force_sub(message.from_user.id)
+        if not_joined: return await show_force_sub_channels(message, not_joined, payload)
+        
+        if status in ["admin", "member", "unlocked"]: return await process_payload(message, payload)
+        else: return await show_unlock_prompt(message, payload)
     
-    await message.reply_text(
-        f"👋 **Welcome {message.from_user.first_name}!**\n\n"
-        "👩 ** Hi i am your assistant Sarah**\n\n"
-        "This bot helps you access & downlod files. ",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    if status == "admin": await show_admin_menu(message)
+    else: await show_user_menu(message)
 
-async def show_admin_menu(message):
-    """Show menu for admin users"""
-    # Get statistics
-    cursor.execute("SELECT COUNT(*) FROM files")
-    total_files = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM batches")
-    total_batches = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
-    
-    buttons = [
-        [InlineKeyboardButton("📊 Statistics", callback_data="stats"),
-         InlineKeyboardButton("📁 Batch Mode", callback_data="batch_help")],
-        [InlineKeyboardButton("👥 User Management", callback_data="user_mgmt"),
-         InlineKeyboardButton("📢 Broadcast", callback_data="broadcast")],
-        [InlineKeyboardButton("ℹ️ About", callback_data="about"),
-         InlineKeyboardButton("🔧 Settings", callback_data="settings")]
-    ]
-    
-    await message.reply_text(
-        f"🛡️ **Admin Panel - Welcome {message.from_user.first_name}!**\n\n"
-        f"📊 **Quick Stats:**\n"
-        f"• Files: `{total_files}`\n"
-        f"• Batches: `{total_batches}`\n"
-        f"• Users: `{total_users}`\n\n"
-        f"📤 **Upload Files:** Just send any media file\n"
-        f"📦 **Create Batch:** Use batch mode for multiple files\n\n"
-        f"Choose an option below:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+# NEW BATCH COMMAND
+@bot.on_message(filters.command("batch") & filters.private)
+async def batch_command(_, message: Message):
+    if not is_admin(message.from_user.id): return
 
-@bot.on_callback_query()
-async def handle_callbacks(_, query):
-    data = query.data
-    user_id = query.from_user.id
-    
-    if data == "help":
-        await query.message.edit_text(
-            "📖 **How to Use This Bot**\n\n"
-            "🔸 **For Users:**\n"
-            "• Click on file links to download\n"
-            "• All file types are supported\n"
-            "• Links work permanently\n\n"
-            "🔸 **File Types Supported:**\n"
-            "• Documents (PDF, DOC, etc.)\n"
-            "• Videos (MP4, MKV, etc.)\n"
-            "• Photos (JPG, PNG, etc.)\n"
-            "• Audio files (MP3, etc.)\n"
-            "• Voice messages\n"
-            "• Stickers & Animations\n"
-            "• And much more!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back")]])
-        )
-    
-    elif data == "about":
-        await query.message.edit_text(
-            "🔹 **Version:** 2.0\n"
-            "🔹 **Features:**\n"
-            "• All media types support\n"
-            "• Batch download\n"
-            "🔹 **Developed by : @x0deyen\n"
-            "🔹 **Status:** Active ✅",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back")]])
-        )
-    
-    elif data == "contact":
-        admin_list = ", ".join([f"@admin{i}" for i in range(1, len(ADMINS)+1)])
-        await query.message.edit_text(
-            "📞 **Contact Information**\n\n"
-            "Need help? Contact our admins:\n\n"
-            f"👨‍💼 **Admins:** {admin_list}\n\n"
-            "⏰ **Response Time:** Usually within 24 hours\n"
-            "📝 **For:** Technical issues, file requests, general queries",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back")]])
-        )
-    
-    elif data == "stats" and is_admin(user_id):
-        cursor.execute("SELECT COUNT(*) FROM files")
-        total_files = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM batches")
-        total_batches = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM users")
-        total_users = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")
-        banned_users = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT SUM(file_size) FROM files")
-        total_size = cursor.fetchone()[0] or 0
-        
-        await query.message.edit_text(
-            "📊 **Detailed Statistics**\n\n"
-            f"📁 **Files:** {total_files}\n"
-            f"📦 **Batches:** {total_batches}\n"
-            f"👥 **Total Users:** {total_users}\n"
-            f"🚫 **Banned Users:** {banned_users}\n"
-            f"💾 **Storage Used:** {format_file_size(total_size)}\n\n"
-            f"🤖 **Bot Status:** Online ✅\n"
-            f"📈 **Performance:** Excellent",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back")]])
-        )
-    
-    elif data == "batch_help" and is_admin(user_id):
-        await query.message.edit_text(
-            "📦 **Batch Mode Guide**\n\n"
-            "🔸 **How to create batches:**\n"
-            "1. Use `/startbatch <batch_name>` command\n"
-            "2. Upload your files one by one\n"
-            "3. Use `/endbatch` when done\n\n"
-            "🔸 **Alternative method:**\n"
-            "Use `/newbatch <start_id> <end_id>` with message IDs from DB channel\n\n"
-            "🔸 **Benefits:**\n"
-            "• Single link for multiple files\n"
-            "• Organized file sharing\n"
-            "• Easy management",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back")]])
-        )
-    
-    elif data == "back":
-        if is_admin(user_id):
-            await show_admin_menu(query.message)
-        else:
-            await show_user_menu(query.message)
-
-# ------------------ ADMIN FILE UPLOAD ------------------
-
-@bot.on_message(filters.private & ~filters.command(["start", "newbatch", "startbatch", "endbatch", "broadcast"]) & 
-                (filters.document | filters.video | filters.audio | filters.photo | 
-                 filters.voice | filters.video_note | filters.sticker | filters.animation))
-async def handle_media_upload(_, message):
-    if not is_admin(message.from_user.id):
-        return await message.reply_text(
-            "❌ **Access Denied**\n\n"
-            "Only administrators can upload files to this bot.\n"
-            "If you need to upload files, please contact an admin."
-        )
-    
-    # Get file information
-    file_info = get_file_info(message)
-    if not file_info:
-        return await message.reply_text("❌ Unsupported file type.")
-    
-    # Forward to database channel
     try:
-        sent = await message.forward(DB_CHANNEL)
-    except Exception as e:
-        return await message.reply_text(f"❌ Failed to save file: {str(e)}")
-    
-    # Save to database
-    cursor.execute("""INSERT INTO files (chat_id, message_id, file_name, file_type, file_size, uploaded_by) 
-                     VALUES (?, ?, ?, ?, ?, ?)""", 
-                  (DB_CHANNEL, sent.id, file_info['name'], file_info['type'], 
-                   file_info['size'], message.from_user.id))
-    conn.commit()
-    file_id = cursor.lastrowid
-    
-    # Generate link
-    token = encode_payload(f"file_{file_id}")
-    bot_username = (await bot.get_me()).username
-    link = f"https://t.me/{bot_username}?start={token}"
-    
-    # Create response with file details
-    buttons = [
-        [InlineKeyboardButton("🚀Open link", url=link)],
-        [InlineKeyboardButton("📊 View Stats", callback_data="stats")]
-    ]
-    
-    await message.reply_text(
-        f"✅ **File Uploaded Successfully!**\n\n"
-        f"📝 **File Details:**\n"
-        f"• Name: `{file_info['name']}`\n"
-        f"• Type: `{file_info['type']}`\n"
-        f"• Size: `{format_file_size(file_info['size'])}`\n\n"
-        f"🔗 **Share Link:**\n`{link}`\n\n"
-        f"💡 Anyone with this link can download the file.",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-# ------------------ BATCH SYSTEM ------------------
-
-@bot.on_message(filters.private & filters.command("startbatch"))
-async def start_batch_upload(_, message):
-    if not is_admin(message.from_user.id):
-        return await message.reply_text("❌ Only admins can create batches.")
-    
-    try:
-        batch_name = " ".join(message.command[1:])
-        if not batch_name:
-            return await message.reply_text("Usage: `/startbatch <batch_name>`")
-    except:
-        return await message.reply_text("Usage: `/startbatch <batch_name>`")
-    
-    session_id = f"{message.from_user.id}_{int(datetime.now().timestamp())}"
-    
-    # Get current message ID from DB channel (next message will be start)
-    try:
-        test_msg = await bot.send_message(DB_CHANNEL, f"📦 **Batch Start:** {batch_name}")
-        start_msg_id = test_msg.id
-        await test_msg.delete()
-    except:
-        return await message.reply_text("❌ Failed to access database channel.")
-    
-    cursor.execute("""INSERT INTO batch_upload_sessions (session_id, admin_id, batch_name, start_msg_id) 
-                     VALUES (?, ?, ?, ?)""", (session_id, message.from_user.id, batch_name, start_msg_id))
-    conn.commit()
-    
-    await message.reply_text(
-        f"📦 **Batch Upload Started**\n\n"
-        f"📝 **Batch Name:** {batch_name}\n\n"
-        f"📤 Now send me the files you want to include in this batch.\n"
-        f"When you're done, use `/endbatch` command.\n\n"
-        f"🔄 **Session ID:** `{session_id}`"
-    )
-
-@bot.on_message(filters.private & filters.command("endbatch"))
-async def end_batch_upload(_, message):
-    if not is_admin(message.from_user.id):
-        return await message.reply_text("❌ Only admins can end batches.")
-    
-    # Find active session for this admin
-    cursor.execute("SELECT * FROM batch_upload_sessions WHERE admin_id = ? AND status = 'waiting_end'", 
-                   (message.from_user.id,))
-    session = cursor.fetchone()
-    
-    if not session:
-        return await message.reply_text("❌ No active batch session found.")
-    
-    session_id, admin_id, batch_name, start_msg_id, status = session
-    
-    # Get current message ID from DB channel
-    try:
-        test_msg = await bot.send_message(DB_CHANNEL, f"📦 **Batch End:** {batch_name}")
-        end_msg_id = test_msg.id - 1  # Previous message was the last file
-        await test_msg.delete()
-    except:
-        return await message.reply_text("❌ Failed to access database channel.")
-    
-    # Create batch
-    cursor.execute("INSERT INTO batches (batch_name, start_msg, end_msg, created_by) VALUES (?, ?, ?, ?)", 
-                   (batch_name, start_msg_id, end_msg_id, admin_id))
-    conn.commit()
-    batch_id = cursor.lastrowid
-    
-    # Clean up session
-    cursor.execute("DELETE FROM batch_upload_sessions WHERE session_id = ?", (session_id,))
-    conn.commit()
-    
-    # Generate link
-    token = encode_payload(f"batch_{batch_id}")
-    bot_username = (await bot.get_me()).username
-    link = f"https://t.me/{bot_username}?start={token}"
-    
-    file_count = end_msg_id - start_msg_id + 1
-    
-    buttons = [
-        [InlineKeyboardButton("🚀 Open Batch Link", url=link)],
-        [InlineKeyboardButton("📊 View Stats", callback_data="stats")]
-    ]
-    
-    await message.reply_text(
-        f"✅ **Batch Created Successfully!**\n\n"
-        f"📦 **Batch Name:** {batch_name}\n"
-        f"📁 **Files:** {file_count} files\n"
-        f"🆔 **Batch ID:** #{batch_id}\n\n"
-        f"🔗 **Share Link:**\n`{link}`\n\n"
-        f"💡 Anyone with this link can download all files in the batch.",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-# Traditional batch creation (existing method)
-@bot.on_message(filters.private & filters.command("newbatch"))
-async def new_batch_traditional(_, message):
-    if not is_admin(message.from_user.id):
-        return await message.reply_text("❌ Only admins can create batches.")
-    
-    try:
-        parts = message.text.split()
-        if len(parts) < 3:
-            return await message.reply_text(
-                "📦 **Create Batch**\n\n"
-                "**Usage:** `/newbatch <start_msg_id> <end_msg_id> [batch_name]`\n\n"
-                "**Example:** `/newbatch 100 150 My Movie Collection`"
-            )
+        if len(message.command) < 4:
+            raise ValueError
         
-        start_id = int(parts[1])
-        end_id = int(parts[2])
-        batch_name = " ".join(parts[3:]) if len(parts) > 3 else f"Batch {start_id}-{end_id}"
-        
+        start_id = int(message.command[1])
+        end_id = int(message.command[2])
+        batch_name = " ".join(message.command[3:])
+
         if start_id >= end_id:
-            return await message.reply_text("❌ Start message ID must be less than end message ID.")
+            return await message.reply_text("❌ Start message ID must be less than the end message ID.", quote=True)
         
-    except ValueError:
-        return await message.reply_text("❌ Please provide valid message IDs (numbers only).")
-    
-    # Create batch
-    cursor.execute("INSERT INTO batches (batch_name, start_msg, end_msg, created_by) VALUES (?, ?, ?, ?)", 
-                   (batch_name, start_id, end_id, message.from_user.id))
-    conn.commit()
-    batch_id = cursor.lastrowid
-    
-    # Generate link
-    token = encode_payload(f"batch_{batch_id}")
-    bot_username = (await bot.get_me()).username
-    link = f"https://t.me/{bot_username}?start={token}"
-    
-    file_count = end_id - start_id + 1
-    
-    buttons = [
-        [InlineKeyboardButton("🚀 Open Batch Link", url=link)],
-        [InlineKeyboardButton("📊 View Stats", callback_data="stats")]
-    ]
-    
-    await message.reply_text(
-        f"✅ **Batch Created Successfully!**\n\n"
-        f"📦 **Batch Name:** {batch_name}\n"
-        f"📁 **Files:** {file_count} files\n"
-        f"🆔 **Batch ID:** #{batch_id}\n\n"
-        f"🔗 **Share Link:**\n`{link}`\n\n"
-        f"💡 Anyone with this link can download all files in the batch.",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+        batch_id = db.add_batch(batch_name, start_id, end_id, message.from_user.id)
+        link = f"https://t.me/{(await bot.get_me()).username}?start={encode_payload(f'batch_{batch_id}')}"
+        
+        await message.reply_text(f"✅ **Batch '{batch_name}' created!**\n\n- Contains: `{end_id - start_id + 1}` files.\n- Link: `{link}`", quote=True, disable_web_page_preview=True)
 
-# ------------------ FILE DELIVERY ------------------
+    except (ValueError, IndexError):
+        await message.reply_text(
+            "**Invalid Command Format**\n\n"
+            "**Usage:** `/batch <start_msg_id> <end_msg_id> <Batch Name>`\n\n"
+            "**Example:** `/batch 101 150 My Awesome Collection`",
+            quote=True
+        )
+
+async def process_payload(message: Message, encoded_payload: str):
+    payload = decode_payload(encoded_payload)
+    if not payload: return await message.reply_text("⚠️ Invalid or expired link.", quote=True)
+    if payload.startswith("file_"): await send_file(message, int(payload.split("_", 1)[1]))
+    if payload.startswith("batch_"): await send_batch(message, int(payload.split("_", 1)[1]))
+
+async def show_unlock_prompt(message: Message, original_payload: str):
+    token = db.create_unlock_token(message.from_user.id, original_payload)
+    deep_link = f"https://t.me/{(await bot.get_me()).username}?start=unlock_{token}"
+    shortened_link = shorten_url(deep_link)
+    buttons = [
+        [InlineKeyboardButton("▶️ Watch an Ad", url=shortened_link)],
+        [InlineKeyboardButton("💎 Go Premium", callback_data="become_member")]
+    ]
+    unlock_text = (
+        "🚀 **Continue Using the Bot**\n\n"
+        "To keep all features active, select an option below:"
+    )
+    await message.reply_text(unlock_text, reply_markup=InlineKeyboardMarkup(buttons), quote=True)
+
+async def show_force_sub_channels(message: Message, channel_ids: list, payload: str):
+    buttons = []
+    for cid in channel_ids:
+        try:
+            chat = await bot.get_chat(cid)
+            invite_link = chat.invite_link or f"https://t.me/{chat.username}"
+            buttons.append([InlineKeyboardButton(f"Join {chat.title}", url=invite_link)])
+        except Exception: pass
+    buttons.append([InlineKeyboardButton("✅ I Have Joined, Retry", callback_data=f"retry_{payload}")])
+    await message.reply_text("**Please Join Our Channels**\n\nYou must join our channel(s) to get files.", reply_markup=InlineKeyboardMarkup(buttons), quote=True)
+
+# --- Menus & UI ---
+async def show_user_menu(message: Message):
+    await message.reply_text(USER_WELCOME_TEXT.format(name=message.from_user.first_name), quote=True)
+
+async def show_admin_menu(message: Message, is_edit=False):
+    text = ADMIN_WELCOME_TEXT.format(name=message.from_user.first_name)
+    buttons = [
+        [InlineKeyboardButton("📢 Broadcast", callback_data="broadcast"), InlineKeyboardButton("📊 Statistics", callback_data="stats")],
+        [InlineKeyboardButton("👥 User Management", callback_data="user_mgmt"), InlineKeyboardButton("🔗 Force Sub", callback_data="force_sub_mgmt")],
+        [InlineKeyboardButton("💰 Payment Settings", callback_data="payment_settings"), InlineKeyboardButton("⚙️ Bot Settings", callback_data="bot_settings")]
+    ]
+    reply_markup = InlineKeyboardMarkup(buttons)
+    
+    if is_edit:
+        try: await message.edit_text(text, reply_markup=reply_markup)
+        except: pass
+    else:
+        await message.reply_text(text, reply_markup=reply_markup, quote=True)
+
+# --- Callback Handler ---
+@bot.on_callback_query()
+async def handle_callbacks(_, query: Message):
+    data, user_id = query.data, query.from_user.id
+    
+    is_public = data.startswith("retry_") or data == "become_member"
+    if not is_admin(user_id) and not is_public: return await query.answer("🚫 Access Denied.", show_alert=True)
+
+    if data.startswith("retry_"):
+        payload = data.split("_", 1)[1]
+        if not await check_force_sub(user_id):
+            await query.message.delete()
+            await process_payload(query.message, payload)
+        else:
+            await query.answer("You still haven't joined all channels.", show_alert=True)
+        return
+
+    if data == "back_admin": return await show_admin_menu(query.message, is_edit=True)
+    
+    if data == "become_member":
+        upi = db.get_setting("upi_handle")
+        qr = db.get_setting("qr_code_url")
+        link = db.get_setting("payment_link")
+        caption = BECOME_MEMBER_TEXT.format(upi_handle=upi)
+        buttons = [[InlineKeyboardButton("Click Here to Pay (UPI Link)", url=link)]] if link and "http" in link else []
+        try: await query.message.reply_photo(photo=qr, caption=caption, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None, parse_mode=ParseMode.MARKDOWN)
+        except: await query.message.reply_text(caption, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None, parse_mode=ParseMode.MARKDOWN)
+        await query.answer()
+        return
+
+    # --- Admin Callbacks ---
+    if data == "stats":
+        stats = db.get_stats()
+        stats_text = (f"📊 **Bot Statistics**\n\n"
+                      f"📁 **Content:** `{stats['files']}` files saved.\n"
+                      f"👥 **Users:** `{stats['users']}` total users.\n"
+                      f"💎 **Members:** `{stats['members']}` premium members.\n"
+                      f"🚫 **Banned:** `{stats['banned']}` users banned.")
+        await query.message.edit_text(stats_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back_admin")]]))
+
+    elif data == "bot_settings":
+        delete_time = db.get_setting("auto_delete_minutes")
+        buttons = [[InlineKeyboardButton("⏱️ Change Auto-Delete Time", callback_data="change_autodelete")], [InlineKeyboardButton("⬅️ Back", callback_data="back_admin")]]
+        await query.message.edit_text(f"⚙️ **Bot Settings**\n\n- Files are deleted after `{delete_time}` minutes.", reply_markup=InlineKeyboardMarkup(buttons))
+
+    elif data == "change_autodelete":
+        buttons = [[InlineKeyboardButton(f"{m} min", callback_data=f"set_delete_{m}") for m in [10, 30, 60]], [InlineKeyboardButton("Never (0)", callback_data="set_delete_0")], [InlineKeyboardButton("⬅️ Back", callback_data="bot_settings")]]
+        await query.message.edit_text("Select the auto-delete time:", reply_markup=InlineKeyboardMarkup(buttons))
+
+    elif data.startswith("set_delete_"):
+        minutes = int(data.split("_")[-1])
+        db.set_setting("auto_delete_minutes", str(minutes))
+        await query.answer(f"✅ Auto-delete time set to {minutes} minutes.", show_alert=True)
+        query.data = "bot_settings"
+        await handle_callbacks(bot, query)
+
+    elif data == "payment_settings":
+        upi = db.get_setting('upi_handle')
+        link = db.get_setting('payment_link')
+        buttons = [[InlineKeyboardButton("✏️ UPI ID", callback_data="change_upi"), InlineKeyboardButton("🔗 Pay Link", callback_data="change_payment_link")], [InlineKeyboardButton("🖼️ QR Code", callback_data="change_qr")], [InlineKeyboardButton("⬅️ Back", callback_data="back_admin")]]
+        await query.message.edit_text(f"💰 **Payment Settings**\n\n- **UPI:** `{upi}`\n- **Link:** `{link}`", reply_markup=InlineKeyboardMarkup(buttons))
+
+    elif data == "user_mgmt":
+        buttons = [
+            [InlineKeyboardButton("➕ Add Member", callback_data="add_member"), InlineKeyboardButton("➖ Remove Member", callback_data="remove_member")],
+            [InlineKeyboardButton("🚫 Ban User", callback_data="ban_user"), InlineKeyboardButton("✅ Unban User", callback_data="unban_user")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="back_admin")]
+        ]
+        await query.message.edit_text("👥 **User Management**", reply_markup=InlineKeyboardMarkup(buttons))
+    
+    elif data == "force_sub_mgmt":
+        buttons = [[InlineKeyboardButton("➕ Add Channel", callback_data="add_channel")], [InlineKeyboardButton("⬅️ Back", callback_data="back_admin")]]
+        await query.message.edit_text("Use the buttons to manage your force subscribe channels.", reply_markup=InlineKeyboardMarkup(buttons))
+    
+    prompts = {
+        "broadcast": "Send the message to broadcast to all users.", "add_channel": "Forward a message from the channel or send its ID.",
+        "change_upi": "Send the new UPI ID.", "change_payment_link": "Send the new payment link.", "change_qr": "Send the new QR code photo.",
+        "add_member": "Send the User ID to make a member.", "remove_member": "Send the User ID to remove from members.",
+        "ban_user": "Send the User ID to ban.", "unban_user": "Send the User ID to unban."
+    }
+    if data in prompts:
+        user_states[user_id] = data
+        back_map = {"change_upi": "payment_settings", "change_payment_link": "payment_settings", "change_qr": "payment_settings", "add_channel": "force_sub_mgmt"}
+        back_callback = back_map.get(data, "user_mgmt" if "user" in data or "member" in data else "back_admin")
+        await query.message.edit_text(prompts[data], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=back_callback)]]))
+
+# --- Message Handler ---
+@bot.on_message(filters.private & ~filters.command(["start", "help", "batch"]))
+async def handle_private_messages(_, message: Message):
+    user_id = message.from_user.id
+    if not is_admin(user_id): return
+    
+    if user_id in user_states:
+        state = user_states.pop(user_id)
+        
+        if state == "broadcast":
+            users = db.get_broadcast_users()
+            progress = await message.reply_text(f"📢 Broadcasting to {len(users)} users...", quote=True)
+            s, f = 0, 0
+            for u in users:
+                try: await message.copy(u[0]); s += 1
+                except: f += 1
+                await asyncio.sleep(0.05)
+            await progress.edit_text(f"✅ **Broadcast Complete**\n\n- Sent: `{s}` | Failed: `{f}`")
+        
+        elif state == "add_channel":
+            try:
+                cid = message.forward_from_chat.id if message.forward_from_chat else int(message.text)
+                cname = (await bot.get_chat(cid)).title
+                db.add_fsub_channel(cid, cname)
+                await message.reply_text(f"✅ Channel '{cname}' added to force sub list.", quote=True)
+            except: await message.reply_text("❌ Could not add channel. Make sure I am an admin there and the ID is correct.", quote=True)
+
+        elif state == "change_upi": db.set_setting("upi_handle", message.text.strip()); await message.reply_text("✅ UPI ID updated.", quote=True)
+        elif state == "change_payment_link": db.set_setting("payment_link", message.text.strip()); await message.reply_text("✅ Payment Link updated.", quote=True)
+        elif state == "change_qr":
+            if message.photo: db.set_setting("qr_code_url", message.photo.file_id); await message.reply_text("✅ QR Code updated.", quote=True)
+            else: await message.reply_text("❌ Please send a photo.", quote=True)
+        
+        elif message.text and message.text.isdigit():
+            target_id = int(message.text)
+            if state == "add_member": db.set_user_member(target_id, True)
+            elif state == "remove_member": db.set_user_member(target_id, False)
+            elif state == "ban_user": db.set_user_banned(target_id, True)
+            elif state == "unban_user": db.set_user_banned(target_id, False)
+            await message.reply_text(f"✅ User `{target_id}` has been updated successfully.", quote=True)
+        else:
+            await message.reply_text("❌ Invalid input. Please send a numeric User ID.", quote=True)
+        return
+
+    # Default action for admins is to upload a single file
+    if message.media: await handle_media_upload(message)
+
+# --- File Operations ---
+def get_file_info(message: Message):
+    media = message.document or message.video or message.audio or message.photo
+    if not media: return None
+    return {'name': getattr(media, 'file_name', f"Media File"), 'type': message.media.value.split('.')[-1].title(), 'size': media.file_size}
+
+async def handle_media_upload(message: Message):
+    if not (file_info := get_file_info(message)): return await message.reply_text("❌ Unsupported file type.", quote=True)
+    try:
+        sent_msg = await message.forward(DB_CHANNEL)
+        file_id = db.add_file(message, sent_msg, file_info)
+        link = f"https://t.me/{(await bot.get_me()).username}?start={encode_payload(f'file_{file_id}')}"
+        await message.reply_text(f"✅ **File Uploaded**\n\n🔗 **Link:** `{link}`", disable_web_page_preview=True, parse_mode=ParseMode.MARKDOWN, quote=True)
+    except Exception as e: await message.reply_text(f"❌ Failed to save file: {e}", quote=True)
 
 async def send_file(message, file_id):
-    """Send a single file to user"""
-    cursor.execute("SELECT chat_id, message_id, file_name, file_type FROM files WHERE id=?", (file_id,))
-    row = cursor.fetchone()
+    if not (file_data := db.get_file(file_id)): return await message.reply_text("❌ File Not Found.", quote=True)
+    chat_id, msg_id, file_name = file_data
+    delete_time = int(db.get_setting("auto_delete_minutes") or 0)
     
-    if not row:
-        return await message.reply_text(
-            "❌ **File Not Found**\n\n"
-            "The requested file could not be found. It may have been deleted or the link is invalid."
-        )
-    
-    chat_id, msg_id, file_name, file_type = row
+    # Show loading message
+    loading_msg = await message.reply_text("⏳ **Sending file, please wait...**", quote=True)
     
     try:
-        # Send file info first
-        await message.reply_text(
-            f"📁 **Downloading File...**\n\n"
-            f"📝 **Name:** {file_name}\n"
-            f"📂 **Type:** {file_type}\n\n"
-            f"⏳ Please wait while we fetch your file..."
-           
-        )
+        sent_msg = await bot.copy_message(message.chat.id, chat_id, msg_id)
         
-        # Copy the actual file
-        await bot.copy_message(message.chat.id, chat_id, msg_id)
+        # Delete loading message
+        await loading_msg.delete()
         
-        # Send completion message
-        await message.reply_text(
-            f"✅ **Download Complete!**\n\n"
-            f"File: {file_name}"
-            f"⚠️Download it or Forward this files to saved msg it will delete with in 10 min!"
-        )
-        
-    except Exception as e:
-        await message.reply_text(
-            f"❌ **Download Failed**\n\n"
-            f"Error: {str(e)}\n"
-            f"Please try again later or contact admin."
-        )
+        if delete_time > 0:
+            info_msg = await message.reply_text(
+                f"⚠️ **Notice:**\n\n"
+                f"This file will automatically **expire** and **self-destruct** in **{delete_time} minutes**.\n\n"
+                f"Please forward this to your **Saved Messages** 🕒",
+                quote=True
+            )
+            asyncio.create_task(delete_messages_after_delay(message.chat.id, [sent_msg.id, info_msg.id], delete_time))
+    except Exception as e: 
+        await loading_msg.delete()
+        await message.reply_text(f"❌ Download Failed: {e}", quote=True)
 
 async def send_batch(message, batch_id):
-    """Send all files in a batch to user"""
-    cursor.execute("SELECT batch_name, start_msg, end_msg FROM batches WHERE id=?", (batch_id,))
-    row = cursor.fetchone()
+    if not (batch_data := db.get_batch(batch_id)): return await message.reply_text("❌ Batch Not Found.", quote=True)
+    name, start_id, end_id = batch_data
+    delete_time = int(db.get_setting("auto_delete_minutes") or 0)
     
-    if not row:
-        return await message.reply_text(
-            "❌ **Not Found**\n\n"
-            "The requested batch could not be found. It may have been deleted or the link is invalid."
-        )
+    # Show loading message
+    loading_msg = await message.reply_text(f"⏳ **Sending files, please wait...**", quote=True)
     
-    batch_name, start, end = row
-    file_count = end - start + 1
+    sent_message_ids = []
     
-    # Send batch info
-    await message.reply_text(
-        f"📦 **Download Started**\n\n"
-        f"📝 **Name:** {batch_name}\n"
-        f"📁 **Files:** {file_count} files\n\n"
-    )
-    
-    successful = 0
-    failed = 0
-    
-    for msg_id in range(start, end + 1):
+    for msg_id in range(start_id, end_id + 1):
         try:
-            await bot.copy_message(message.chat.id, DB_CHANNEL, msg_id)
-            successful += 1
-            await asyncio.sleep(0.5)  # Small delay to avoid flooding
-        except:
-            failed += 1
+            sent_msg = await bot.copy_message(message.chat.id, DB_CHANNEL, msg_id)
+            sent_message_ids.append(sent_msg.id)
+            await asyncio.sleep(0.5)
+        except Exception:
+            pass
     
-    # Send completion summary
-    await message.reply_text(
-        f"✅ **Download Complete!**\n\n"
-        f"📦 **{batch_name}**\n"
-        f"✅ **Downloaded:** {successful} files\n"
-        f"❌ **Failed:** {failed} files\n\n"
-        f"💡 Thank you for using our service!"
-    )
-
-# ------------------ BROADCAST SYSTEM ------------------
-
-@bot.on_message(filters.private & filters.command("broadcast"))
-async def broadcast_message(_, message):
-    if not is_admin(message.from_user.id):
-        return await message.reply_text("❌ Only admins can broadcast messages.")
+    # Delete loading message
+    await loading_msg.delete()
     
-    if len(message.command) < 2:
-        return await message.reply_text(
-            "📢 **Broadcast Message**\n\n"
-            "**Usage:** `/broadcast <your_message>`\n\n"
-            "**Example:** `/broadcast 🎉 New files available! Check them out.`"
+    if delete_time > 0:
+        info_msg = await message.reply_text(
+            f"⚠️ **Notice:**\n\n"
+            f"These files will automatically **expire** and **self-destruct** in **{delete_time} minutes**.\n\n"
+            f"Please forward them to your **Saved Messages** 🕒",
+            quote=True
         )
-    
-    broadcast_text = " ".join(message.command[1:])
-    
-    # Get all users
-    cursor.execute("SELECT user_id FROM users WHERE is_banned = 0")
-    users = cursor.fetchall()
-    
-    if not users:
-        return await message.reply_text("❌ No users found to broadcast to.")
-    
-    # Confirm broadcast
-    buttons = [
-        [InlineKeyboardButton("✅ Confirm Broadcast", callback_data=f"confirm_broadcast_{len(users)}")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_broadcast")]
-    ]
-    
-    await message.reply_text(
-        f"📢 **Confirm Broadcast**\n\n"
-        f"**Message:** {broadcast_text}\n"
-        f"**Recipients:** {len(users)} users\n\n"
-        f"Are you sure you want to send this message to all users?",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+        
+        # Store batch message IDs for deletion
+        for msg_id in sent_message_ids:
+            db.add_batch_message(batch_id, msg_id, message.from_user.id)
+        
+        # Add info message to deletion list
+        sent_message_ids.append(info_msg.id)
+        
+        # Schedule deletion
+        asyncio.create_task(delete_batch_messages(message.chat.id, batch_id, message.from_user.id, sent_message_ids, delete_time))
 
-# Start the bot
+async def delete_batch_messages(chat_id, batch_id, user_id, message_ids, delay_minutes):
+    """Delete batch messages after delay"""
+    if delay_minutes <= 0: return
+    await asyncio.sleep(delay_minutes * 60)
+    try:
+        await bot.delete_messages(chat_id, message_ids)
+        db.clear_batch_messages(batch_id, user_id)
+    except: pass
+
+# --- Bot Startup ---
 if __name__ == "__main__":
-    print("✅ Bot is now running and ready to serve!")
+    db._create_tables()
+    print("BOT STARTED")
     bot.run()
