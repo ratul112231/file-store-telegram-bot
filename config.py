@@ -13,7 +13,7 @@ DB_CHANNEL = -1003656239689  # Replace with your channel ID
 ADMINS = [6992010963, 7831735222]  # Replace with actual Telegram user IDs
 
 # Your API token from ShrinkEarn.com
-SHORTENER_API = "YOUR_SHRINKEARN_API_TOKEN"
+SHORTENER_API = "https://shrinkearn.com/st?api=d3d48de6b3ec0268e3d69a0f68869c6b40d94322&url=yourdestinationlink.com"
 
 # --- DEFAULT SETTINGS (Can be changed from the admin panel) ---
 DEFAULT_bkash_HANDLE = "your-bkash-id@RatulHosain"
