@@ -14,7 +14,7 @@ from config import (
 from database import Database
 
 # --- Initialization ---
-bot = Client("FileStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+bot = Client("FileStoreBot", api_id=39396720, api_hash=945f0314b982ab0847fd009e5e447b64, bot_token=8222385318:AAH6AK3nSOX2CPxLNAr9CQtqhJZfM-8Jhro)
 db = Database()
 user_states = {}
 
@@ -26,9 +26,9 @@ def decode_payload(p: str) -> str:
     except: return None
 
 def shorten_url(long_url):
-    if not SHORTENER_API or "YOUR" in SHORTENER_API: return long_url
+    if not SHORTENER_API or "d3d48de6b3ec0268e3d69a0f68869c6b40d94322" in SHORTENER_API: return long_url
     try:
-        api_url = f"https://shrinkearn.com/api?api={SHORTENER_API}&url={quote(long_url)}&format=text"
+        api_url = f"https://shrinkearn.com/st?api=d3d48de6b3ec0268e3d69a0f68869c6b40d94322&url=yourdestinationlink.com"
         response = requests.get(api_url, timeout=10)
         return response.text.strip() if response.ok and response.text.strip() else long_url
     except: return long_url
