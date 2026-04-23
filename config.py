@@ -22,7 +22,7 @@ DEFAULT_PAYMENT_LINK = "https://qr.bka.sh/281014021VIVv0szr0EB6CCB5C" # Example 
 DEFAULT_AUTO_DELETE_MINUTES = 10 # Default time in minutes for files to be deleted after sending
 
 # Your username for users to send payment screenshots to
-PAYMENT_ADMIN = "YOUR_TELEGRAM_USERNAME" # IF YOU DON'T HAVE USERNAME, USE YOUR TELEGRAM ID
+PAYMENT_ADMIN = "@ratulislam1133" # IF YOU DON'T HAVE USERNAME, USE YOUR TELEGRAM ID
 
 # --- TEXT CONFIGURATION ---
 USER_WELCOME_TEXT = "👋 Welcome, {name}!**\n\nI am your file assistant, Sarah. To get a file, simply click on a valid link."
