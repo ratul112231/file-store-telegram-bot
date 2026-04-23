@@ -15,7 +15,7 @@ from database import Database
 
 # --- Initialization ---
 bot = Client("FileStoreBot", api_id=39396720, api_hash=945f0314b982ab0847fd009e5e447b64, bot_token=8222385318:AAH6AK3nSOX2CPxLNAr9CQtqhJZfM-8Jhro)
-db = Database()
+db = Database(mongodb+srv://ratulislam124597:ratulislam124598@cluster0.27rxkhb.mongodb.net/?appName=Cluster0)
 user_states = {}
 
 # --- Helper Functions ---
